@@ -75,9 +75,17 @@ function normalize(s) {
   return s;
 }
 
+let saveWarned = false;
+
 function save() {
-  if (state) localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  else localStorage.removeItem(STORAGE_KEY);
+  try {
+    if (state) localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    else localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // e.g. private browsing or storage full; warn once rather than on every click.
+    if (!saveWarned) alert("Couldn't save to this browser. Changes will be lost on reload, so use Export to keep a copy.");
+    saveWarned = true;
+  }
 }
 
 // --- Scoring ----------------------------------------------------------------
@@ -134,11 +142,20 @@ function opponents() {
 
 function buchholz() {
   const s = scores();
-  const opp = opponents();
   const v = buchholzVariant();
+  // One entry per round played, so a rematch opponent counts twice. A bye counts as
+  // a virtual opponent with the player's own score, so byes don't drag the tiebreak down.
+  const oppScores = Object.fromEntries(state.players.map((p) => [p.id, []]));
+  for (const round of state.rounds) {
+    for (const m of round) {
+      if (m.b === null) { oppScores[m.a].push(s[m.a]); continue; }
+      oppScores[m.a].push(s[m.b]);
+      oppScores[m.b].push(s[m.a]);
+    }
+  }
   const out = {};
   for (const p of state.players) {
-    const sorted = [...opp[p.id]].map((id) => s[id]).sort((a, b) => a - b);
+    const sorted = oppScores[p.id].sort((a, b) => a - b);
     const trimmed = sorted.slice(v.cutLow, Math.max(v.cutLow, sorted.length - v.cutHigh));
     out[p.id] = trimmed.reduce((acc, n) => acc + n, 0);
   }
@@ -439,7 +456,7 @@ function renderTournament() {
       el("th", { class: "num" }, "Score"),
       el("th", {}, hasDraws ? "W-D-L" : "W-L"),
       state.bestOf > 1 ? el("th", { class: "num", title: "Games won-lost" }, "Games") : null,
-      el("th", { class: "num", title: `${buchholzVariant().label}: ${buchholzVariant().desc}` }, "Buch."),
+      el("th", { class: "num", title: `${buchholzVariant().label}: ${buchholzVariant().desc} A bye counts as an opponent with the player's own score.` }, "Buch."),
       el("th", { class: "no-print" }, ""),
     ])),
     standingsBody,
@@ -452,7 +469,7 @@ function renderTournament() {
     matchesBox,
     statusRow,
     el("h2", {}, "Standings"),
-    table,
+    el("div", { class: "table-wrap" }, table),
   );
 }
 
@@ -546,12 +563,18 @@ function renderMatchesInto(container) {
 
 function renderStandingsInto(tbody, tournamentDone, hasDraws) {
   clear(tbody);
-  standings().forEach((p, i) => {
-    const isWinner = tournamentDone && i === 0 && !p.dropped;
+  const rows = standings();
+  // Everyone still in who ties the leader on score and tiebreak shares first place.
+  const leader = rows.find((p) => !p.dropped);
+  const winners = tournamentDone && leader
+    ? rows.filter((p) => !p.dropped && p.score === leader.score && p.buchholz === leader.buchholz)
+    : [];
+  rows.forEach((p, i) => {
+    const isWinner = winners.includes(p);
     const w = p.record.w + p.record.byes;
     const rec = hasDraws ? `${w}-${p.record.d}-${p.record.l}` : `${w}-${p.record.l}`;
     const nameCell = isWinner
-      ? el("td", {}, [el("span", { class: "winner-mark", title: "Winner" }, "★ "), p.name])
+      ? el("td", {}, [el("span", { class: "winner-mark", title: winners.length > 1 ? "Shared first place" : "Winner" }, "★ "), p.name])
       : el("td", {}, p.dropped ? `${p.name} (dropped)` : p.name);
 
     const dropBtn = el("button", {
@@ -559,6 +582,7 @@ function renderStandingsInto(tbody, tournamentDone, hasDraws) {
       onclick: () => {
         const target = state.players.find((x) => x.id === p.id);
         target.dropped = !target.dropped;
+        if (target.dropped) offerForfeit(target);
         save();
         render();
       },
@@ -580,6 +604,17 @@ function renderStandingsInto(tbody, tournamentDone, hasDraws) {
       el("td", { class: "no-print" }, dropBtn),
     ]));
   });
+}
+
+// If a dropped player still has an unfinished match in the current round, offer to score it as a forfeit.
+function offerForfeit(player) {
+  const m = state.rounds.at(-1).find((x) => x.b !== null && x.result === null && (x.a === player.id || x.b === player.id));
+  if (!m) return;
+  const oppId = m.a === player.id ? m.b : m.a;
+  if (!confirm(`${player.name} has an unfinished match against ${playerName(oppId)}. Record it as a forfeit win for ${playerName(oppId)}?`)) return;
+  const toWin = gamesToWin();
+  m.result = m.a === oppId ? 1 : 0;
+  m.games = m.a === oppId ? [toWin, 0] : [0, toWin];
 }
 
 function formatScore(n) {
