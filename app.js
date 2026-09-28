@@ -6,8 +6,10 @@ const STORAGE_KEY = "swiss-tournament-v1";
 // {
 //   title: string,
 //   buchholzVariant: "full" | "cut1" | "median",
+//   bestOf: 1 | 3 | 5,
 //   players: [{ id, name, dropped }],
-//   rounds: [ [ { a, b, result } ] ],  // b === null => bye; result: 1, 0, 0.5, or null
+//   rounds: [ [ { a, b, result, games } ] ],  // b === null => bye; result: 1 (a won), 0 (b won), 0.5 (legacy draw), or null
+//                                             // games: [gamesA, gamesB] or null
 //   totalRounds: number,
 //   viewRound: number,
 // }
@@ -18,8 +20,14 @@ const BUCHHOLZ_VARIANTS = {
   median: { label: "Median Buchholz", desc: "Sum of opponents' scores, dropping the highest and the lowest.", cutLow: 1, cutHigh: 1 },
 };
 
+const BEST_OF = [1, 3, 5];
+
 function buchholzVariant() {
   return BUCHHOLZ_VARIANTS[state?.buchholzVariant] || BUCHHOLZ_VARIANTS.full;
+}
+
+function gamesToWin() {
+  return Math.ceil(state.bestOf / 2);
 }
 let state = load();
 
@@ -27,15 +35,44 @@ function load() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    const s = JSON.parse(raw);
-    // Backfill fields added later.
-    if (typeof s.title !== "string") s.title = "";
-    if (!BUCHHOLZ_VARIANTS[s.buchholzVariant]) s.buchholzVariant = "full";
-    s.players = s.players.map((p) => ({ dropped: false, ...p }));
-    return s;
+    return normalize(JSON.parse(raw));
   } catch {
     return null;
   }
+}
+
+// Validates saved/imported data and backfills fields added later.
+// Throws on anything the views can't render.
+function normalize(s) {
+  if (!s || !Array.isArray(s.players) || !Array.isArray(s.rounds)) throw new Error("missing players or rounds");
+  if (s.rounds.length === 0) throw new Error("tournament has no rounds");
+
+  const ids = new Set();
+  for (const p of s.players) {
+    if (typeof p?.id !== "number" || typeof p.name !== "string") throw new Error("invalid player");
+    if (ids.has(p.id)) throw new Error(`duplicate player id ${p.id}`);
+    ids.add(p.id);
+  }
+  for (const round of s.rounds) {
+    if (!Array.isArray(round)) throw new Error("invalid round");
+    for (const m of round) {
+      if (!ids.has(m?.a) || (m.b !== null && !ids.has(m.b))) throw new Error("match references unknown player");
+      if (![1, 0, 0.5, null].includes(m.result)) throw new Error("invalid match result");
+      if (m.games != null && !(Array.isArray(m.games) && m.games.length === 2 && m.games.every(Number.isInteger))) {
+        throw new Error("invalid game score");
+      }
+    }
+  }
+
+  if (typeof s.title !== "string") s.title = "";
+  if (!BUCHHOLZ_VARIANTS[s.buchholzVariant]) s.buchholzVariant = "full";
+  if (!BEST_OF.includes(s.bestOf)) s.bestOf = 1;
+  s.players = s.players.map((p) => ({ dropped: false, ...p }));
+  if (!Number.isInteger(s.totalRounds) || s.totalRounds < s.rounds.length) s.totalRounds = s.rounds.length;
+  if (!Number.isInteger(s.viewRound) || s.viewRound < 0 || s.viewRound >= s.rounds.length) {
+    s.viewRound = s.rounds.length - 1;
+  }
+  return s;
 }
 
 function save() {
@@ -62,8 +99,8 @@ function scores() {
 }
 
 function records() {
-  // { id: { w, d, l, byes } }
-  const r = Object.fromEntries(state.players.map((p) => [p.id, { w: 0, d: 0, l: 0, byes: 0 }]));
+  // { id: { w, d, l, byes, gw, gl } }
+  const r = Object.fromEntries(state.players.map((p) => [p.id, { w: 0, d: 0, l: 0, byes: 0, gw: 0, gl: 0 }]));
   for (const round of state.rounds) {
     for (const m of round) {
       if (m.b === null) {
@@ -71,6 +108,10 @@ function records() {
         continue;
       }
       if (m.result === null) continue;
+      if (m.games) {
+        r[m.a].gw += m.games[0]; r[m.a].gl += m.games[1];
+        r[m.b].gw += m.games[1]; r[m.b].gl += m.games[0];
+      }
       if (m.result === 1) { r[m.a].w += 1; r[m.b].l += 1; }
       else if (m.result === 0) { r[m.b].w += 1; r[m.a].l += 1; }
       else if (m.result === 0.5) { r[m.a].d += 1; r[m.b].d += 1; }
@@ -135,40 +176,53 @@ function generatePairings() {
   shuffle(pool);
   pool.sort((a, b) => s[b.id] - s[a.id]);
 
-  let byePlayer = null;
+  // Bye candidates, lowest-ranked first. Nobody gets a second bye while someone else hasn't had one.
+  // Each candidate is tried in turn, since the choice of bye can decide whether a rematch-free pairing exists.
+  let byeCandidates = [null];
   if (pool.length % 2 === 1) {
-    for (let i = pool.length - 1; i >= 0; i--) {
-      if (!byeSet.has(pool[i].id)) { byePlayer = pool[i]; break; }
-    }
-    if (!byePlayer) byePlayer = pool[pool.length - 1];
-    const idx = pool.indexOf(byePlayer);
-    pool.splice(idx, 1);
+    const lowFirst = [...pool].reverse();
+    const fresh = lowFirst.filter((p) => !byeSet.has(p.id));
+    byeCandidates = fresh.length ? fresh : lowFirst;
   }
 
-  const matches = pair(pool, opp);
-  if (!matches) {
-    return { matches: pairForce(pool), bye: byePlayer };
+  // Shared cap on search steps so an impossible pairing can't freeze the page.
+  const budget = { steps: 200000 };
+  for (const bye of byeCandidates) {
+    const matches = pair(pool.filter((p) => p !== bye), opp, budget);
+    if (matches) return { matches, bye };
+    if (budget.steps <= 0) break;
   }
-  return { matches, bye: byePlayer };
+
+  // No rematch-free pairing found: allow as few rematches as the greedy pass can manage.
+  const bye = byeCandidates[0];
+  return { matches: pairGreedy(pool.filter((p) => p !== bye), opp), bye };
 }
 
-function pair(pool, opp) {
+function pair(pool, opp, budget) {
   if (pool.length === 0) return [];
+  if (--budget.steps <= 0) return null;
   const a = pool[0];
   for (let i = 1; i < pool.length; i++) {
     const b = pool[i];
     if (opp[a.id].has(b.id)) continue;
     const rest = pool.slice(1, i).concat(pool.slice(i + 1));
-    const sub = pair(rest, opp);
-    if (sub !== null) return [{ a: a.id, b: b.id, result: null }, ...sub];
+    const sub = pair(rest, opp, budget);
+    if (sub !== null) return [{ a: a.id, b: b.id, result: null, games: null }, ...sub];
+    if (budget.steps <= 0) return null;
   }
   return null;
 }
 
-function pairForce(pool) {
+// Pairs top-down, preferring the highest-ranked opponent not yet played.
+function pairGreedy(pool, opp) {
+  const rest = [...pool];
   const out = [];
-  for (let i = 0; i < pool.length; i += 2) {
-    out.push({ a: pool[i].id, b: pool[i + 1].id, result: null });
+  while (rest.length >= 2) {
+    const a = rest.shift();
+    let j = rest.findIndex((b) => !opp[a.id].has(b.id));
+    if (j === -1) j = 0;
+    const [b] = rest.splice(j, 1);
+    out.push({ a: a.id, b: b.id, result: null, games: null });
   }
   return out;
 }
@@ -217,16 +271,9 @@ function importJson(file) {
   const reader = new FileReader();
   reader.onload = () => {
     try {
-      const data = JSON.parse(reader.result);
-      if (!Array.isArray(data.players) || !Array.isArray(data.rounds) || typeof data.totalRounds !== "number") {
-        throw new Error("invalid file");
-      }
+      const data = normalize(JSON.parse(reader.result));
       if (state && !confirm("Replace the current tournament with the imported one?")) return;
       state = data;
-      if (typeof state.title !== "string") state.title = "";
-      if (!BUCHHOLZ_VARIANTS[state.buchholzVariant]) state.buchholzVariant = "full";
-      state.players = state.players.map((p) => ({ dropped: false, ...p }));
-      if (typeof state.viewRound !== "number") state.viewRound = Math.max(0, state.rounds.length - 1);
       save();
       render();
     } catch (e) {
@@ -255,6 +302,10 @@ function renderNew() {
   const roundsInput = el("input", { id: "rounds", type: "number", min: "1", max: "20", value: "4" });
   const importInput = el("input", { type: "file", accept: "application/json,.json", style: "display:none" });
 
+  const bestOfSelect = el("select", { id: "best-of" },
+    BEST_OF.map((n) => el("option", { value: String(n), selected: n === 3 }, n === 1 ? "Single game" : `Best of ${n}`)),
+  );
+
   const buchholzSelect = el("select", { id: "buchholz", title: BUCHHOLZ_VARIANTS.full.desc },
     Object.entries(BUCHHOLZ_VARIANTS).map(([key, v]) =>
       el("option", { value: key, title: v.desc }, v.label),
@@ -280,6 +331,7 @@ function renderNew() {
     state = {
       title: titleInput.value.trim(),
       buchholzVariant: buchholzSelect.value,
+      bestOf: parseInt(bestOfSelect.value, 10),
       players: names.map((name, i) => ({ id: i + 1, name, dropped: false })),
       rounds: [],
       totalRounds,
@@ -295,6 +347,7 @@ function renderNew() {
     el("label", {}, [el("span", {}, "Title (optional)"), titleInput]),
     el("label", {}, [el("span", {}, "Players (one per line)"), playersInput]),
     el("label", {}, [el("span", {}, "Number of rounds"), roundsInput]),
+    el("label", {}, [el("span", {}, "Match format"), bestOfSelect]),
     el("label", {}, [
       el("span", {}, "Tiebreaker (hover for explanation)"),
       buchholzSelect,
@@ -375,15 +428,17 @@ function renderTournament() {
     rightSide,
   ]);
 
+  const hasDraws = state.rounds.some((r) => r.some((m) => m.result === 0.5));
   const standingsBody = el("tbody", { id: "standings" });
-  renderStandingsInto(standingsBody, tournamentDone);
+  renderStandingsInto(standingsBody, tournamentDone, hasDraws);
 
   const table = el("table", {}, [
     el("thead", {}, el("tr", {}, [
       el("th", {}, "#"),
       el("th", {}, "Player"),
       el("th", { class: "num" }, "Score"),
-      el("th", {}, "W-D-L"),
+      el("th", {}, hasDraws ? "W-D-L" : "W-L"),
+      state.bestOf > 1 ? el("th", { class: "num", title: "Games won-lost" }, "Games") : null,
       el("th", { class: "num", title: `${buchholzVariant().label}: ${buchholzVariant().desc}` }, "Buch."),
       el("th", { class: "no-print" }, ""),
     ])),
@@ -393,6 +448,7 @@ function renderTournament() {
   view.append(
     nav,
     el("h2", {}, `Round ${viewRound + 1} of ${state.totalRounds}`),
+    el("p", { class: "muted no-print hint" }, state.bestOf > 1 ? "Click the winner's name, then pick the game score. Click the name again to clear." : "Click the winner's name, or Draw. Click again to clear."),
     matchesBox,
     statusRow,
     el("h2", {}, "Standings"),
@@ -408,31 +464,92 @@ function renderMatchesInto(container) {
       container.append(el("div", { class: "bye" }, `${playerName(m.a)} — bye (+1)`));
       return;
     }
-    const makeBtn = (val, label) =>
-      el("button", {
-        class: m.result === val ? "selected" : "",
-        dataset: { r: String(val) },
-        onclick: () => {
-          const cur = state.rounds[state.viewRound][i];
-          cur.result = cur.result === val ? null : val;
-          save();
-          render();
-        },
-      }, label);
+    const toWin = gamesToWin();
+    const update = (fn) => {
+      fn(state.rounds[state.viewRound][i]);
+      save();
+      render();
+    };
 
-    container.append(el("div", { class: "match" }, [
-      el("span", { class: "player" }, playerName(m.a)),
-      el("span", { class: "result" }, [makeBtn(1, "1"), makeBtn(0.5, "½"), makeBtn(0, "0")]),
-      el("span", { class: "player right" }, playerName(m.b)),
+    // Clicking the winner records a sweep; clicking them again clears the result.
+    const pickWinner = (side) => update((cur) => {
+      const result = side === "a" ? 1 : 0;
+      if (cur.result === result) { cur.result = null; cur.games = null; return; }
+      cur.result = result;
+      cur.games = side === "a" ? [toWin, 0] : [0, toWin];
+    });
+
+    // outcome from this side's perspective: "win" | "loss" | "draw" (legacy data) | null
+    const outcome = (side) => {
+      if (m.result === null) return null;
+      if (m.result === 0.5) return "draw";
+      return (m.result === 1) === (side === "a") ? "win" : "loss";
+    };
+    const badge = { win: "Win", loss: "Loss", draw: "½" };
+
+    const pickBtn = (side) => {
+      const id = side === "a" ? m.a : m.b;
+      const o = outcome(side);
+      const name = playerName(id);
+      return el("button", {
+        class: ["pick", side === "b" ? "right" : "", o ? `is-${o}` : ""].filter(Boolean).join(" "),
+        "aria-pressed": o === "win" ? "true" : "false",
+        title: o === "win" ? "Click to clear result" : `${name} wins`,
+        onclick: () => pickWinner(side),
+      }, [
+        el("span", { class: "name" }, name),
+        o ? el("span", { class: "badge" }, badge[o]) : null,
+      ]);
+    };
+
+    // Middle column: "vs" until a winner is picked, then the game score from the winner's side.
+    // Single games can be drawn, so they get a Draw toggle instead.
+    let middle;
+    if (toWin === 1) {
+      middle = el("button", {
+        class: ["draw", m.result === 0.5 ? "selected" : ""].filter(Boolean).join(" "),
+        "aria-pressed": m.result === 0.5 ? "true" : "false",
+        title: m.result === 0.5 ? "Click to clear result" : "Draw",
+        onclick: () => update((cur) => {
+          cur.result = cur.result === 0.5 ? null : 0.5;
+          cur.games = null;
+        }),
+      }, "Draw");
+    } else if (m.result !== 1 && m.result !== 0) {
+      middle = el("span", { class: "vs" }, m.result === 0.5 ? "Draw" : "vs");
+    } else {
+      const winnerIdx = m.result === 1 ? 0 : 1;
+      const loserGames = m.games ? m.games[1 - winnerIdx] : 0;
+      const options = [];
+      for (let lg = 0; lg < toWin; lg++) {
+        // Show the score in board order (left–right) so it matches the names.
+        const label = winnerIdx === 0 ? `${toWin}–${lg}` : `${lg}–${toWin}`;
+        options.push(el("button", {
+          class: lg === loserGames ? "selected" : "",
+          "aria-pressed": lg === loserGames ? "true" : "false",
+          title: `Game score ${label}`,
+          onclick: () => update((cur) => {
+            cur.games = winnerIdx === 0 ? [toWin, lg] : [lg, toWin];
+          }),
+        }, label));
+      }
+      middle = el("span", { class: "score", role: "group", "aria-label": "Game score" }, options);
+    }
+
+    container.append(el("div", { class: ["match", m.result === null ? "pending" : "done"].join(" ") }, [
+      pickBtn("a"),
+      middle,
+      pickBtn("b"),
     ]));
   });
 }
 
-function renderStandingsInto(tbody, tournamentDone) {
+function renderStandingsInto(tbody, tournamentDone, hasDraws) {
   clear(tbody);
   standings().forEach((p, i) => {
     const isWinner = tournamentDone && i === 0 && !p.dropped;
-    const rec = `${p.record.w + p.record.byes}-${p.record.d}-${p.record.l}`;
+    const w = p.record.w + p.record.byes;
+    const rec = hasDraws ? `${w}-${p.record.d}-${p.record.l}` : `${w}-${p.record.l}`;
     const nameCell = isWinner
       ? el("td", {}, [el("span", { class: "winner-mark", title: "Winner" }, "★ "), p.name])
       : el("td", {}, p.dropped ? `${p.name} (dropped)` : p.name);
@@ -458,6 +575,7 @@ function renderStandingsInto(tbody, tournamentDone) {
       nameCell,
       el("td", { class: "num" }, formatScore(p.score)),
       el("td", {}, rec),
+      state.bestOf > 1 ? el("td", { class: "num" }, `${p.record.gw}-${p.record.gl}`) : null,
       el("td", { class: "num" }, formatScore(p.buchholz)),
       el("td", { class: "no-print" }, dropBtn),
     ]));

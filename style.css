@@ -93,7 +93,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 .match {
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   gap: 0.5rem;
   padding: 0.6rem;
@@ -103,17 +103,54 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   background: #fff;
 }
 
-.match .player { font-weight: 500; }
-.match .player.right { text-align: right; }
-.match .result { display: flex; gap: 0.25rem; }
-.match .result button {
-  padding: 0.25rem 0.55rem;
-  font-size: 0.85rem;
-  min-width: 2rem;
+.match.done { border-color: #c7c7c7; }
+
+.match .pick {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-width: 0;
+  text-align: left;
+  font-weight: 500;
+  padding: 0.5rem 0.7rem;
 }
-.match .result button.selected[data-r="1"] { background: var(--win); color: #fff; border-color: var(--win); }
-.match .result button.selected[data-r="0"] { background: var(--loss); color: #fff; border-color: var(--loss); }
-.match .result button.selected[data-r="0.5"] { background: var(--draw); color: #fff; border-color: var(--draw); }
+.match .pick.right { flex-direction: row-reverse; text-align: right; }
+.match .pick .name { overflow-wrap: anywhere; }
+.match .pick:hover { border-color: var(--win); }
+.match .pick.is-win { background: var(--win); color: #fff; border-color: var(--win); }
+.match .pick.is-loss { color: var(--muted); font-weight: 400; }
+.match .pick.is-loss:hover { border-color: var(--border); }
+.match .pick.is-draw { background: #fef3c7; border-color: var(--draw); }
+
+.match .badge {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.08);
+}
+.match .pick.is-win .badge { background: rgba(255, 255, 255, 0.25); }
+
+.match .vs { color: var(--muted); font-size: 0.85rem; text-align: center; min-width: 2.5rem; }
+
+.match button.draw { font-size: 0.85rem; color: var(--muted); padding: 0.4rem 0.7rem; }
+.match button.draw:hover { border-color: var(--draw); color: var(--fg); }
+.match button.draw.selected { background: var(--draw); color: #fff; border-color: var(--draw); }
+
+.match .score { display: flex; gap: 0.25rem; }
+.match .score button {
+  padding: 0.3rem 0.5rem;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.match .score button.selected { background: var(--fg); color: #fff; border-color: var(--fg); }
+
+.hint { margin: -0.25rem 0 0.75rem; }
 
 .bye {
   display: block;
@@ -154,12 +191,26 @@ tr.dropped td:last-child { text-decoration: none; }
 tr.winner td { background: #fef9c3; font-weight: 600; }
 .winner-mark { color: #b45309; margin-right: 0.15rem; }
 
+@media (max-width: 480px) {
+  main { padding: 1rem; }
+  .match { padding: 0.5rem; gap: 0.35rem; }
+  .match .pick { padding: 0.5rem; }
+  .match .badge { display: none; }
+  .match .score { flex-direction: column; }
+  th, td { padding: 0.4rem 0.3rem; font-size: 0.85rem; white-space: nowrap; }
+  td:nth-child(2) { white-space: normal; }
+}
+
 @media print {
   body { background: #fff; }
   .no-print { display: none !important; }
   header { border-bottom: 2px solid #000; }
   button { display: none; }
   .match { break-inside: avoid; }
+  .match .score button:not(.selected) { display: none; }
+  .match .score button.selected { display: inline-block; background: none; color: #000; border: none; font-weight: 700; }
+  .match .pick { display: flex; border: none; background: none !important; color: #000 !important; padding: 0; }
+  .match .pick.is-win .name { font-weight: 700; }
   table { break-inside: auto; }
   tr { break-inside: avoid; }
 }
