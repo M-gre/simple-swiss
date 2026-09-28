@@ -15,9 +15,9 @@ const STORAGE_KEY = "swiss-tournament-v1";
 // }
 
 const BUCHHOLZ_VARIANTS = {
-  full:   { label: "Buchholz",        desc: "Sum of all opponents' scores.",                                  cutLow: 0, cutHigh: 0 },
-  cut1:   { label: "Buchholz Cut-1",  desc: "Sum of opponents' scores, dropping the lowest one.",             cutLow: 1, cutHigh: 0 },
-  median: { label: "Median Buchholz", desc: "Sum of opponents' scores, dropping the highest and the lowest.", cutLow: 1, cutHigh: 1 },
+  full:   { label: "Buchholz",        desc: "Average of all opponents' scores.",                                  cutLow: 0, cutHigh: 0 },
+  cut1:   { label: "Buchholz Cut-1",  desc: "Average of opponents' scores, dropping the lowest one.",             cutLow: 1, cutHigh: 0 },
+  median: { label: "Median Buchholz", desc: "Average of opponents' scores, dropping the highest and the lowest.", cutLow: 1, cutHigh: 1 },
 };
 
 const BEST_OF = [1, 3, 5];
@@ -147,12 +147,12 @@ function opponents() {
 function buchholz() {
   const s = scores();
   const v = buchholzVariant();
-  // One entry per round played, so a rematch opponent counts twice. A bye counts as
-  // a virtual opponent with the player's own score, so byes don't drag the tiebreak down.
+  // One entry per match played, so a rematch opponent counts twice. Byes are skipped, as in
+  // Magic tournaments; averaging (rather than summing) keeps a bye from lowering the tiebreak.
   const oppScores = Object.fromEntries(state.players.map((p) => [p.id, []]));
   for (const round of state.rounds) {
     for (const m of round) {
-      if (m.b === null) { oppScores[m.a].push(s[m.a]); continue; }
+      if (m.b === null) continue;
       oppScores[m.a].push(s[m.b]);
       oppScores[m.b].push(s[m.a]);
     }
@@ -161,7 +161,7 @@ function buchholz() {
   for (const p of state.players) {
     const sorted = oppScores[p.id].sort((a, b) => a - b);
     const trimmed = sorted.slice(v.cutLow, Math.max(v.cutLow, sorted.length - v.cutHigh));
-    out[p.id] = trimmed.reduce((acc, n) => acc + n, 0);
+    out[p.id] = trimmed.length ? trimmed.reduce((acc, n) => acc + n, 0) / trimmed.length : 0;
   }
   return out;
 }
@@ -467,7 +467,7 @@ function renderTournament() {
       el("th", { class: "num" }, "Score"),
       el("th", {}, hasDraws ? "W-D-L" : "W-L"),
       state.bestOf > 1 ? el("th", { class: "num col-games", title: "Games won-lost" }, "Games") : null,
-      el("th", { class: "num", title: `${buchholzVariant().label}: ${buchholzVariant().desc} A bye counts as an opponent with the player's own score.` }, "Buch."),
+      el("th", { class: "num", title: `${buchholzVariant().label}: ${buchholzVariant().desc} Byes are not counted.` }, "Buch."),
       state.bestOf > 1 ? el("th", { class: "num", title: "Game win %: share of games won (a bye counts as a clean win). Second tiebreaker." }, "GW%") : null,
       el("th", { class: "no-print" }, ""),
     ])),
@@ -613,7 +613,7 @@ function renderStandingsInto(tbody, tournamentDone, hasDraws) {
       el("td", { class: "num" }, formatScore(p.score)),
       el("td", {}, rec),
       state.bestOf > 1 ? el("td", { class: "num col-games" }, `${p.record.gw}-${p.record.gl}`) : null,
-      el("td", { class: "num" }, formatScore(p.buchholz)),
+      el("td", { class: "num" }, Number.isInteger(p.buchholz) ? String(p.buchholz) : p.buchholz.toFixed(2)),
       state.bestOf > 1 ? el("td", { class: "num" }, p.gwp === null ? "–" : `${Math.round(p.gwp * 100)}%`) : null,
       el("td", { class: "no-print" }, dropBtn),
     ]));
