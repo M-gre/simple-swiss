@@ -112,7 +112,11 @@ function records() {
   for (const round of state.rounds) {
     for (const m of round) {
       if (m.b === null) {
-        if (m.result !== null) r[m.a].byes += 1;
+        if (m.result !== null) {
+          r[m.a].byes += 1;
+          // A bye counts as a clean match win in games too, so it doesn't lower game win %.
+          if (state.bestOf > 1) r[m.a].gw += gamesToWin();
+        }
         continue;
       }
       if (m.result === null) continue;
@@ -175,12 +179,19 @@ function standings() {
   const b = buchholz();
   const r = records();
   return [...state.players]
-    .map((p) => ({ ...p, score: s[p.id], buchholz: b[p.id], record: r[p.id] }))
+    .map((p) => ({ ...p, score: s[p.id], buchholz: b[p.id], record: r[p.id], gwp: gameWinPct(r[p.id]) }))
     .sort((x, y) =>
       y.score - x.score ||
       y.buchholz - x.buchholz ||
+      (state.bestOf > 1 ? (y.gwp ?? -1) - (x.gwp ?? -1) : 0) ||
       x.name.localeCompare(y.name),
     );
+}
+
+// Share of games won, or null before any games are recorded.
+function gameWinPct(rec) {
+  const played = rec.gw + rec.gl;
+  return played ? rec.gw / played : null;
 }
 
 // --- Swiss pairing ----------------------------------------------------------
@@ -455,8 +466,9 @@ function renderTournament() {
       el("th", {}, "Player"),
       el("th", { class: "num" }, "Score"),
       el("th", {}, hasDraws ? "W-D-L" : "W-L"),
-      state.bestOf > 1 ? el("th", { class: "num", title: "Games won-lost" }, "Games") : null,
+      state.bestOf > 1 ? el("th", { class: "num col-games", title: "Games won-lost" }, "Games") : null,
       el("th", { class: "num", title: `${buchholzVariant().label}: ${buchholzVariant().desc} A bye counts as an opponent with the player's own score.` }, "Buch."),
+      state.bestOf > 1 ? el("th", { class: "num", title: "Game win %: share of games won (a bye counts as a clean win). Second tiebreaker." }, "GW%") : null,
       el("th", { class: "no-print" }, ""),
     ])),
     standingsBody,
@@ -567,14 +579,15 @@ function renderStandingsInto(tbody, tournamentDone, hasDraws) {
   // Everyone still in who ties the leader on score and tiebreak shares first place.
   const leader = rows.find((p) => !p.dropped);
   const winners = tournamentDone && leader
-    ? rows.filter((p) => !p.dropped && p.score === leader.score && p.buchholz === leader.buchholz)
+    ? rows.filter((p) => !p.dropped && p.score === leader.score && p.buchholz === leader.buchholz &&
+        (state.bestOf === 1 || p.gwp === leader.gwp))
     : [];
   rows.forEach((p, i) => {
     const isWinner = winners.includes(p);
     const w = p.record.w + p.record.byes;
     const rec = hasDraws ? `${w}-${p.record.d}-${p.record.l}` : `${w}-${p.record.l}`;
     const nameCell = isWinner
-      ? el("td", {}, [el("span", { class: "winner-mark", title: winners.length > 1 ? "Shared first place" : "Winner" }, "★ "), p.name])
+      ? el("td", {}, [el("span", { class: "winner-mark", title: winners.length > 1 ? "Shared first place" : "Winner" }, "★\u00a0"), p.name])
       : el("td", {}, p.dropped ? `${p.name} (dropped)` : p.name);
 
     const dropBtn = el("button", {
@@ -599,8 +612,9 @@ function renderStandingsInto(tbody, tournamentDone, hasDraws) {
       nameCell,
       el("td", { class: "num" }, formatScore(p.score)),
       el("td", {}, rec),
-      state.bestOf > 1 ? el("td", { class: "num" }, `${p.record.gw}-${p.record.gl}`) : null,
+      state.bestOf > 1 ? el("td", { class: "num col-games" }, `${p.record.gw}-${p.record.gl}`) : null,
       el("td", { class: "num" }, formatScore(p.buchholz)),
+      state.bestOf > 1 ? el("td", { class: "num" }, p.gwp === null ? "–" : `${Math.round(p.gwp * 100)}%`) : null,
       el("td", { class: "no-print" }, dropBtn),
     ]));
   });
