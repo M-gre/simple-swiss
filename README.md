@@ -19,4 +19,4 @@ Players on the same score are ranked by:
 1. **Buchholz**: the average of their opponents' scores (full, cut-1 or median, chosen at the start). Byes are ignored, as in Magic tournaments.
 2. **Game win %** (best of 3 / 5 only): share of games won. A bye counts as a clean match win (e.g. 2–0).
 
-Players still tied after both share first place.
+If the leaders are still tied after both, they share first place; other remaining ties are listed alphabetically.
